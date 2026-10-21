@@ -1,0 +1,29 @@
+groups:
+  - name: microservices_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: (sum(rate(http_requests_total{status=~"5.."}[1m])) by (service) / sum(rate(http_requests_total[1m])) by (service)) > 0.15
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate on {{ $labels.service }}"
+          description: "{{ $labels.service }} is experiencing > 15% 5xx errors (current: {{ $value | humanizePercentage }})."
+
+      - alert: ServiceLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, service)) > 1.5
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 Latency high on {{ $labels.service }}"
+          description: "P95 response latency on {{ $labels.service }} exceeded 1.5s (current: {{ $value | humanizeDuration }})."
+
+      - alert: ServiceDown
+        expr: up{job=~"order-service|payment-service"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target service {{ $labels.service }} is down"
+          description: "Prometheus cannot scrape {{ $labels.service }} on {{ $labels.instance }}."

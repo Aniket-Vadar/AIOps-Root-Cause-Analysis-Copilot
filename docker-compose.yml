@@ -1,0 +1,201 @@
+services:
+  # ============================================================
+  # 1. Telemetry Fabric: OpenTelemetry, Prometheus, Tempo, Loki
+  # ============================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yml"]
+    volumes:
+      - ./observability/otel-collector/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+    networks:
+      - aiops-network
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2h
+      - --storage.tsdb.retention.size=1GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - aiops-network
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: tempo
+    command: ["-config.file=/etc/tempo-config.yml"]
+    volumes:
+      - ./observability/tempo/tempo-config.yml:/etc/tempo-config.yml:ro
+    ports:
+      - "3200:3200"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks:
+      - aiops-network
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    command: ["-config.file=/etc/loki-config.yml"]
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki-config.yml:ro
+    ports:
+      - "3100:3100"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks:
+      - aiops-network
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    networks:
+      - aiops-network
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_USERS_DEFAULT_THEME=dark
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards/json:ro
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - aiops-network
+
+  # ============================================================
+  # 2. Target Microservices Under Test
+  # ============================================================
+  payment-service:
+    build:
+      context: ./apps/payment_service
+      dockerfile: Dockerfile
+    container_name: payment-service
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    ports:
+      - "8002:8002"
+    depends_on:
+      - otel-collector
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    networks:
+      - aiops-network
+
+  order-service:
+    build:
+      context: ./apps/order_service
+      dockerfile: Dockerfile
+    container_name: order-service
+    environment:
+      - PAYMENT_SERVICE_URL=http://payment-service:8002
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    ports:
+      - "8001:8001"
+    depends_on:
+      - payment-service
+      - otel-collector
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    networks:
+      - aiops-network
+
+  # ============================================================
+  # 3. LangGraph RCA Copilot Backend
+  # ============================================================
+  copilot-backend:
+    build:
+      context: .
+      dockerfile: copilot/backend/Dockerfile
+    container_name: copilot-backend
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-1.5-flash}
+      - PROMETHEUS_URL=http://prometheus:9090
+      - TEMPO_URL=http://tempo:3200
+      - LOKI_URL=http://loki:3100
+      - ALERTMANAGER_URL=http://alertmanager:9093
+    ports:
+      - "8000:8000"
+    depends_on:
+      - prometheus
+      - alertmanager
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks:
+      - aiops-network
+
+  # ============================================================
+  # 4. Streamlit Operations Dashboard
+  # ============================================================
+  copilot-ui:
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+    container_name: copilot-ui
+    environment:
+      - COPILOT_BACKEND_URL=http://copilot-backend:8000
+      - PAYMENT_SERVICE_URL=http://payment-service:8002
+      - ORDER_SERVICE_URL=http://order-service:8001
+      - GRAFANA_URL=http://localhost:3000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - copilot-backend
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - aiops-network
+
+networks:
+  aiops-network:
+    driver: bridge
